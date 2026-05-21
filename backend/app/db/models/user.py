@@ -1,6 +1,11 @@
-"""User model with onboarding_status, onboarding_step, and goals fields."""
+"""User model with onboarding and debt limit fields."""
 
-from sqlalchemy import String
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+
+from sqlalchemy import BigInteger, DateTime, Float, JSON, String, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -9,9 +14,18 @@ from app.db.base import Base
 class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    telegram_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    telegram_chat_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    timezone: Mapped[str] = mapped_column(String(64), default="UTC")
+    max_debt_limit: Mapped[float] = mapped_column(Float, default=0.0)
     onboarding_status: Mapped[str] = mapped_column(String(32), default="incomplete")
     onboarding_step: Mapped[str] = mapped_column(String(64), default="welcome")
-    goals: Mapped[str | None] = mapped_column(String, nullable=True)
-    preferences: Mapped[str | None] = mapped_column(String, nullable=True)
+    onboarding_data: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )

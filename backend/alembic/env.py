@@ -7,7 +7,7 @@ from sqlalchemy import engine_from_config, pool
 
 from app.core.config import settings
 from app.db.base import Base
-from app.db.models import Insight, Task, TimeDebt, User  # noqa: F401
+from app.db.models import Task, TimeDebtLedger, User, UserProfileInsight  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:
