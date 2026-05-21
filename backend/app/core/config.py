@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4o-mini"
 
     admin_api_key: str = ""
+    api_key: str = ""
 
 
 settings = Settings()

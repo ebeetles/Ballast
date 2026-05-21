@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from unittest.mock import AsyncMock, patch
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -15,6 +17,7 @@ from app.db.base import Base
 from app.db.crud import insight_crud, ledger_crud, task_crud, user_crud
 from app.db.models.task import TaskStatus
 from app.db.models.user import User
+from app.main import app
 
 
 @pytest.fixture
@@ -75,3 +78,22 @@ async def insight(session: AsyncSession, user: User):
         insight="Works best in morning blocks",
         strength=8,
     )
+
+
+@pytest.fixture
+async def http_client() -> AsyncIterator[AsyncClient]:
+    """AsyncClient wired to the FastAPI app under test."""
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        yield client
+
+
+@pytest.fixture
+def mock_send_message():
+    """Patch telegram_client.send_message with an AsyncMock."""
+    with patch(
+        "app.telegram.client.telegram_client.send_message",
+        new_callable=AsyncMock,
+    ) as mock:
+        yield mock
