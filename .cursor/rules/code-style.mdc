@@ -1,0 +1,48 @@
+---
+description: Python code style and conventions for Ballast
+globs: backend/**/*.py
+alwaysApply: false
+---
+
+# Code Style
+
+## Python version
+
+- Python 3.11+
+
+## Typing
+
+- Use type hints on all public functions and method signatures.
+- Prefer `Mapped[]` for SQLAlchemy model columns.
+
+## Async
+
+- API routes and DB access are async (`async def`, `AsyncSession`).
+- Scheduler job wrappers may be sync; delegate to async services via `asyncio.run` or an async helper if needed.
+
+## Modules
+
+- One primary class or responsibility per file.
+- Module docstring at top describing the file's single responsibility.
+
+## Stubs
+
+- Use `pass` or `raise NotImplementedError` in unimplemented stubs; do not add fake business logic.
+
+## Logging
+
+- Use structured logging from `app.core.logging`; no bare `print()` in application code.
+
+## Configuration
+
+- Read settings only via `app.core.config.settings`; never `os.getenv` in feature code.
+
+## Errors
+
+- Raise exceptions from `app.core.exceptions` for domain errors.
+- Map domain errors to HTTP responses only in `api/` layer (when applicable).
+
+## Formatting
+
+- Line length 100 characters where practical.
+- Double quotes for strings unless matching surrounding file style.

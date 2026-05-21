@@ -1,0 +1,4 @@
+"""Free slot discovery."""
+
+
+pass

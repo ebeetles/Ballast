@@ -1,0 +1,4 @@
+"""Calendar conflict detection."""
+
+
+pass

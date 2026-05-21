@@ -1,0 +1,60 @@
+---
+description: AI agent routing, loops, tools, and prompt conventions
+globs: backend/app/agent/**/*
+alwaysApply: false
+---
+
+# Agent Logic
+
+## Components
+
+| Module | Responsibility |
+|--------|----------------|
+| `router.py` | Intent classification **only** (uses `prompts/intent_router.txt`) |
+| `cognitive_loop.py` | ReAct loop for `general_chat` only (uses `prompts/cognitive_loop.txt`) |
+| `context_assembler.py` | Assembles prompt context from north_star, insights, tasks, calendar |
+| `response_formatter.py` | Formats LLM output for Telegram |
+| `tools/task_tools.py` | Task CRUD/scheduling tools invoked by cognitive_loop |
+
+## Routing rules
+
+- Dispatcher calls `router` only after onboarding is complete.
+- Known intents (`push_task`, `complete_task`, `add_task`) use thin handlers — **not** the cognitive loop.
+- Only `general_chat` enters `cognitive_loop`.
+
+## Negotiation before commit
+
+- The agent **never mutates the calendar or task state unilaterally**.
+- For any schedule change, the agent proposes first and waits for explicit user confirmation.
+- Only after confirmation does the handler call `schedule_service.commit()`.
+- This rule applies to both thin handlers and the cognitive loop.
+
+## Context weighting
+
+When assembling context for any LLM call, priority order is:
+1. Immediate human state (fatigue signals, explicit user override)
+2. Behavioral profile (Layer 2 insights)
+3. Macro goals (Layer 1 north star)
+
+The agent must never prioritize goals over explicit human needs in the same message.
+
+## Tools
+
+- Cognitive loop may call `task_tools` to mutate tasks via `services/`.
+- Tools must not access DB directly; always go through service layer.
+
+## Prompts
+
+- All system prompts are `.txt` files under `agent/prompts/`.
+- Load prompts from package-relative paths, not CWD.
+- `onboarding.txt` is used by `telegram/handlers/onboarding.py`, not by cognitive_loop.
+
+## LLM calls
+
+- Model and API key from `app.core.config.settings`.
+- Keep router prompts small and focused; full context assembly belongs in `context_assembler`.
+
+## Memory in prompts
+
+- Layer 1: `north_star` (user goals via `user_service`)
+- Layer 2: insights (read-only in assembler; writes only via `insight_engine` in nightly job)

@@ -1,0 +1,83 @@
+---
+description: Layer boundaries, import rules, and request lifecycles for Ballast
+globs: backend/**/*
+alwaysApply: false
+---
+
+# Architecture
+
+## Import rules
+
+- All imports use the `app.` prefix (e.g. `from app.services.task_service import ...`).
+- No relative imports (`from .foo import ...` is forbidden).
+- Package root is `backend/` via `pyproject.toml`.
+
+## Layer boundaries
+
+| Layer | May import | Must not |
+|-------|------------|----------|
+| `api/v1` | `schemas/`, `telegram/`, `core/` | Business logic, DB sessions, services directly in route bodies |
+| `telegram/` | `agent/`, `services/`, `schemas/` (if needed) | Direct DB/session mutations |
+| `agent/` | `services/`, `memory/`, `prompts/`, `tools/` | Direct DB access |
+| `services/` | `db/`, `calendar/`, `memory/` (read-only context) | Telegram, FastAPI |
+| `scheduler/jobs/` | `services/`, `agent/`, `telegram/client` (send only) | Direct DB/session mutations |
+| `memory/insight_engine` | `db/`, `services/` | — |
+| `calendar/` | External GCal APIs, `core/` | Domain commit logic (belongs in `schedule_service`) |
+
+## Inbound request lifecycle (Telegram)
+
+```
+webhook.py → dispatcher.handle_update(update)
+  → if onboarding incomplete: handlers/onboarding.py ONLY
+  → else: agent/router.py → handler by intent
+       → known intents (push_task, complete_task, add_task): thin handlers → services/
+       → general_chat: handlers/general_chat.py → cognitive_loop → task_tools → services/
+```
+
+`webhook.py` must contain only the delegation call to `handle_update`. No other logic.
+
+## Scheduling naming
+
+- `calendar/` — Google Calendar adapter (API, overlaps, free slots).
+- `services/schedule_service.py` — Domain schedule proposal and commit.
+- `scheduler/` — APScheduler cron triggers only.
+
+## Composition root
+
+`app/main.py` creates the FastAPI app, registers `api/v1` routers, and starts/stops APScheduler in app lifespan.
+
+## Schemas
+
+All Pydantic models live in `api/v1/schemas/`. Never define schemas inline in route handlers.
+
+## Security
+
+- Telegram webhook: signature verification in `telegram/client.py`.
+- `core/security.py` API keys: reserved for future admin routes only (no admin routes in V1).
+
+## Insights write path
+
+Insights are **only** written by `memory/insight_engine.py`, called from `scheduler/jobs/nightly_reflection.py`. No service or handler may insert/update insights.
+
+## Time Debt write path
+
+Time Debt is **only** mutated through `services/debt_service.py`. No handler, job, or agent tool may insert or update the `time_debt_ledger` table directly. The ledger is append-only — never update or delete existing rows.
+
+## North star
+
+`memory/north_star.py` reads user goals from DB via `user_service`. Not config/env.
+
+## Onboarding gate
+
+`telegram/dispatcher.py` checks `onboarding_status` before any other routing. Incomplete users never reach `agent/router` or other handlers.
+
+## Proactive jobs
+
+Jobs orchestrate only: call `services/` and/or `agent/`. Never open DB sessions or mutate tables directly.
+
+## Environment and configuration
+
+- All secrets and environment-specific values live in `.env` (gitignored).
+- `.env.example` is the canonical list of required variables, kept up to date.
+- Never hardcode ports, URLs, API keys, or paths anywhere in application code.
+- This rule enables zero-friction migration between Pi, cloud, or any other host.

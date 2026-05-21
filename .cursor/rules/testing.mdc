@@ -1,0 +1,52 @@
+---
+description: Test layout and conventions for Ballast
+globs: backend/tests/**/*
+alwaysApply: false
+---
+
+# Testing
+
+## Layout
+
+**Unit tests** (`tests/unit/`) — mirror and test in isolation:
+
+- `services/`
+- `agent/`
+- `calendar/`
+- `memory/`
+
+**Integration tests** (`tests/integration/`) — multi-layer flows:
+
+- `api/` — webhook and health endpoints
+- `telegram/` — dispatcher, onboarding gate
+- `scheduler/` — job orchestration (mock external deps)
+
+Do not place unit tests under `integration/` or vice versa.
+
+## Rules
+
+- Mock external APIs (Telegram, GCal, LLM) in unit tests.
+- Integration tests may use in-memory SQLite or a test DB fixture from `conftest.py`.
+- Never call production Telegram or LLM APIs in CI tests.
+
+## Running tests
+
+From `backend/`:
+
+```bash
+pytest
+```
+
+`pyproject.toml` sets `pythonpath = ["."]` so imports use `app.*`.
+
+## Fixtures
+
+- Shared fixtures live in `tests/conftest.py`.
+- Per-package fixtures stay in local `conftest.py` if needed later.
+
+## Coverage expectations
+
+- Services: test business rules and edge cases.
+- Agent router: test intent mapping with mocked LLM responses.
+- Dispatcher: test onboarding gate blocks router when incomplete.
+- Nightly reflection integration: verify insights written only through `insight_engine`.
