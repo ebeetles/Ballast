@@ -38,7 +38,8 @@ class Settings(BaseSettings):
     google_calendar_id: str = "primary"
 
     openai_api_key: str = ""
-    llm_model: str = "gpt-4o-mini"
+    anthropic_api_key: str = ""
+    llm_model: str = "claude-haiku-4-5-20251001"
 
     admin_api_key: str = ""
     api_key: str = ""

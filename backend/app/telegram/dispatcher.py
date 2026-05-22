@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from app.agent.router import classify_intent
 from app.api.v1.schemas.webhook import TelegramUpdate
 from app.core.logging import get_logger
 from app.db.session import async_session_factory
@@ -32,8 +33,25 @@ async def handle_update(update: TelegramUpdate) -> None:
         message.text,
     )
 
-    if message.text:
-        try:
-            await telegram_client.send_message(chat_id, message.text)
-        except Exception:
-            logger.exception("failed to send telegram reply chat_id=%s", chat_id)
+    if not message.text:
+        return
+
+    if user.onboarding_status == "pending":
+        logger.info("onboarding_pending chat_id=%s stub_handler", chat_id)
+        return
+
+    result = await classify_intent(message.text, {})
+
+    logger.info(
+        "intent_classified chat_id=%s intent=%s confidence=%.2f params=%s",
+        chat_id,
+        result.intent.value,
+        result.confidence,
+        result.extracted_params,
+    )
+
+    reply = f"Detected: {result.intent.value} ({result.confidence:.2f})\nParams: {result.extracted_params}"
+    try:
+        await telegram_client.send_message(chat_id, reply)
+    except Exception:
+        logger.exception("failed to send telegram reply chat_id=%s", chat_id)
