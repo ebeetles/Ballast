@@ -7,6 +7,7 @@ import hmac
 import httpx
 
 from app.core.config import settings
+from app.core.exceptions import ValidationError
 
 _TELEGRAM_API_BASE = "https://api.telegram.org"
 
@@ -16,7 +17,13 @@ class TelegramClient:
 
     async def send_message(self, chat_id: int, text: str) -> None:
         """Send a text message to the given chat."""
-        url = f"{_TELEGRAM_API_BASE}/bot{settings.telegram_bot_token}/sendMessage"
+        token = settings.telegram_bot_token.strip()
+        if not token:
+            raise ValidationError(
+                "TELEGRAM_BOT_TOKEN is not set. Add it to Ballast/.env or backend/.env "
+                "and restart uvicorn."
+            )
+        url = f"{_TELEGRAM_API_BASE}/bot{token}/sendMessage"
         async with httpx.AsyncClient() as client:
             response = await client.post(url, json={"chat_id": chat_id, "text": text})
             response.raise_for_status()

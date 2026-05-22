@@ -33,4 +33,7 @@ async def handle_update(update: TelegramUpdate) -> None:
     )
 
     if message.text:
-        await telegram_client.send_message(chat_id, message.text)
+        try:
+            await telegram_client.send_message(chat_id, message.text)
+        except Exception:
+            logger.exception("failed to send telegram reply chat_id=%s", chat_id)
