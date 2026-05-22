@@ -17,3 +17,7 @@ class ValidationError(BallastError):
 
 class UnauthorizedError(BallastError):
     """Raised when a request lacks valid credentials or permissions."""
+
+
+class CalendarError(BallastError):
+    """Raised when a Google Calendar API call fails."""
