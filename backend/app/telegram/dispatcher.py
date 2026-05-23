@@ -8,6 +8,7 @@ from app.core.logging import get_logger
 from app.db.session import async_session_factory
 from app.services import user_service
 from app.telegram.client import telegram_client
+from app.telegram.handlers import onboarding as onboarding_handler
 
 logger = get_logger(__name__)
 
@@ -37,7 +38,10 @@ async def handle_update(update: TelegramUpdate) -> None:
         return
 
     if user.onboarding_status == "pending":
-        logger.info("onboarding_pending chat_id=%s stub_handler", chat_id)
+        async with async_session_factory() as session:
+            user, _ = await user_service.get_or_create_user(session, chat_id)
+            await onboarding_handler.handle_onboarding(session, user, message)
+            await session.commit()
         return
 
     result = await classify_intent(message.text, {})

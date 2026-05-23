@@ -30,11 +30,11 @@ def _make_update(
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_onboarding_gate_blocks_pending_user(
+async def test_dispatcher_onboarding_gate_routes_to_handler(
     session: AsyncSession,
     mock_send_message: AsyncMock,
 ) -> None:
-    """Pending users hit the onboarding gate; no reply is sent."""
+    """Pending users hit the onboarding gate and receive the welcome message."""
     existing = await user_crud.create(session, telegram_chat_id=42, onboarding_status="pending")
     await session.commit()
 
@@ -43,7 +43,9 @@ async def test_dispatcher_onboarding_gate_blocks_pending_user(
         mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
         await dispatcher.handle_update(_make_update(chat_id=42, text="hello"))
 
-    mock_send_message.assert_not_awaited()
+    mock_send_message.assert_awaited_once()
+    sent_text: str = mock_send_message.call_args[0][1]
+    assert "Ballast" in sent_text
 
     result = await user_crud.list(session)
     assert len(result) == 1
@@ -55,7 +57,7 @@ async def test_dispatcher_creates_user_when_unknown(
     session: AsyncSession,
     mock_send_message: AsyncMock,
 ) -> None:
-    """New users are created with pending status; onboarding gate stops processing."""
+    """New users are created with pending status and routed to onboarding."""
     with patch("app.telegram.dispatcher.async_session_factory") as mock_factory:
         mock_factory.return_value.__aenter__ = AsyncMock(return_value=session)
         mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -65,7 +67,7 @@ async def test_dispatcher_creates_user_when_unknown(
     assert len(users) == 1
     assert users[0].telegram_chat_id == 99
     assert users[0].onboarding_status == "pending"
-    mock_send_message.assert_not_awaited()
+    mock_send_message.assert_awaited_once()
 
 
 @pytest.mark.asyncio
