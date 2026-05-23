@@ -75,7 +75,7 @@ async def test_dispatcher_routes_intent_for_complete_user(
     session: AsyncSession,
     mock_send_message: AsyncMock,
 ) -> None:
-    """Complete users get their message routed and receive a debug intent reply."""
+    """Complete users get their message classified and routed to the correct thin handler."""
     await user_crud.create(session, telegram_chat_id=55, onboarding_status="complete")
     await session.commit()
 
@@ -85,18 +85,22 @@ async def test_dispatcher_routes_intent_for_complete_user(
         extracted_params={"task": "leetcode"},
     )
 
+    handler_mock = AsyncMock()
+
     with (
         patch("app.telegram.dispatcher.async_session_factory") as mock_factory,
         patch("app.telegram.dispatcher.classify_intent", return_value=intent_result) as mock_classify,
+        patch("app.telegram.dispatcher.push_task_handler.handle", new=handler_mock),
     ):
         mock_factory.return_value.__aenter__ = AsyncMock(return_value=session)
         mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
         await dispatcher.handle_update(_make_update(chat_id=55, text="can't do leetcode tonight"))
 
     mock_classify.assert_awaited_once()
-    sent_text = mock_send_message.call_args[0][1]
-    assert "push_task" in sent_text
-    assert "0.95" in sent_text
+    handler_mock.assert_awaited_once()
+    _, kwargs = handler_mock.call_args
+    passed_result = handler_mock.call_args[0][3]
+    assert passed_result.intent == Intent.push_task
 
 
 @pytest.mark.asyncio

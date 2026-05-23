@@ -18,6 +18,7 @@ class TaskStatus(str, enum.Enum):
     COMPLETED = "completed"
     PUSHED = "pushed"
     FORFEIT = "forfeit"
+    AWAITING_PROOF = "awaiting_proof"
 
 
 class Task(Base):
@@ -45,6 +46,11 @@ class Task(Base):
         default=TaskStatus.PENDING.value,
     )
     requires_proof: Mapped[bool] = mapped_column(Boolean, default=False)
+    gcal_event_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    scheduled_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
