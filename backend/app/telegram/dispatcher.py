@@ -13,6 +13,7 @@ from app.telegram.handlers import confirmation as confirmation_handler
 from app.telegram.handlers import push_task as push_task_handler
 from app.telegram.handlers import complete_task as complete_task_handler
 from app.telegram.handlers import add_task as add_task_handler
+from app.telegram.handlers import general_chat as general_chat_handler
 from app.telegram.handlers.add_task import AWAITING_TITLE_ACTION
 
 logger = get_logger(__name__)
@@ -79,11 +80,7 @@ async def handle_update(update: TelegramUpdate) -> None:
             case Intent.add_task:
                 await add_task_handler.handle(session, user, message, result)
             case Intent.general_chat:
-                reply = f"[general_chat] {result.extracted_params}"
-                try:
-                    await telegram_client.send_message(chat_id, reply)
-                except Exception:
-                    logger.exception("failed to send telegram reply chat_id=%s", chat_id)
+                await general_chat_handler.handle(session, user, message, result)
             case _:
                 try:
                     await telegram_client.send_message(
