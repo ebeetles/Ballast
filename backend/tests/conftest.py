@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.db.base import Base
-from app.db.crud import insight_crud, ledger_crud, task_crud, user_crud
+from app.db.crud import insight_crud, ledger_crud, message_crud, task_crud, user_crud
 from app.db.models.task import TaskStatus
 from app.db.models.user import User
 from app.main import app
@@ -87,6 +87,16 @@ async def http_client() -> AsyncIterator[AsyncClient]:
         transport=ASGITransport(app=app), base_url="http://test"
     ) as client:
         yield client
+
+
+@pytest.fixture
+async def message(session: AsyncSession, user: User):
+    return await message_crud.create(
+        session,
+        user_id=user.id,
+        role="user",
+        content="Hello, I need help staying on track.",
+    )
 
 
 @pytest.fixture
