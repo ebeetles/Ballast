@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.response_formatter import format_proposal
 from app.agent.router import IntentResult
 from app.api.v1.schemas.webhook import TelegramMessage
 from app.core.logging import get_logger
 from app.db.crud import user_crud
 from app.db.models.user import User
 from app.services import debt_service, schedule_service, task_service
+from app.services.user_service import resolve_timezone
 from app.telegram.client import telegram_client
 
 logger = get_logger(__name__)
@@ -46,18 +48,24 @@ async def handle(
         await telegram_client.send_message(chat_id, reply)
         return
 
-    proposal = await schedule_service.propose_reschedule(task, user)
-    total_debt = await debt_service.get_total_debt(session, user.id)
-    new_total = round(total_debt + proposal.debt_delta, 2)
+    time_of_day = intent_result.extracted_params.get("time_of_day")
+    if isinstance(time_of_day, str):
+        time_of_day = time_of_day.strip() or None
+    else:
+        time_of_day = None
 
-    new_time = proposal.proposed_start.strftime("%a %b %-d at %-I:%M %p")
-    reply = (
-        f"Got it — moving '{task.title}' to {new_time}.\n"
-        f"That adds {proposal.debt_delta}h to your time debt ({new_total}h total).\n"
-        "Confirm? (yes/no)"
+    proposal = await schedule_service.propose_reschedule(
+        task, user, time_of_day=time_of_day
+    )
+    total_debt = await debt_service.get_total_debt(session, user.id)
+
+    reply = format_proposal(
+        proposal,
+        current_debt=total_debt,
+        max_debt=user.max_debt_limit,
+        user_timezone=resolve_timezone(user),
     )
 
-    updated_data = {**user.onboarding_data} if user.onboarding_data else {}
     await user_crud.update(
         session,
         user,
@@ -66,9 +74,9 @@ async def handle(
     await session.flush()
 
     logger.info(
-        "push_task_proposed chat_id=%s task=%r new_time=%s",
+        "push_task_proposed chat_id=%s task=%r proposed_start=%s",
         chat_id,
         task.title,
-        new_time,
+        proposal.proposed_start,
     )
-    await telegram_client.send_message(chat_id, reply)
+    await telegram_client.send_message(chat_id, reply, parse_mode="MarkdownV2")

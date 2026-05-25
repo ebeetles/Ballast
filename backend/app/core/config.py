@@ -36,9 +36,20 @@ class Settings(BaseSettings):
 
     google_calendar_credentials_file: str = ""
     google_calendar_id: str = "primary"
+    # IANA timezone for scheduling when user.timezone is unset or still UTC.
+    default_user_timezone: str = "America/Los_Angeles"
 
     openai_api_key: str = ""
     anthropic_api_key: str = ""
+
+    # Intent classification — fast and cheap, haiku is sufficient.
+    router_model: str = "claude-haiku-4-5-20251001"
+    # Cognitive loop and onboarding — needs full reasoning and persona.
+    cognitive_model: str = "claude-sonnet-4-5-20250929"
+    # Lightweight reflection tasks (nightly jobs, insight scoring).
+    reflection_model: str = "claude-haiku-4-5-20251001"
+
+    # Deprecated: kept so any external code referencing llm_model still works.
     llm_model: str = "claude-haiku-4-5-20251001"
 
     admin_api_key: str = ""

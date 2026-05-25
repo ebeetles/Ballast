@@ -101,7 +101,7 @@ async def test_malformed_llm_response(patch_anthropic):
 
     result = await classify_intent("some message", {})
 
-    assert result.intent == Intent.unknown
+    assert result.intent == Intent.general_chat
     assert result.confidence == 0.0
     assert result.extracted_params == {}
 
@@ -113,7 +113,7 @@ async def test_api_failure(patch_anthropic):
 
     result = await classify_intent("push my run", {})
 
-    assert result.intent == Intent.unknown
+    assert result.intent == Intent.general_chat
     assert result.confidence == 0.0
     assert result.extracted_params == {}
 

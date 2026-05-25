@@ -78,7 +78,7 @@ def _make_message(*, role="user", content="Hello"):
     return msg
 
 
-def _make_session(user=None, tasks=None, debt_sum=None, insights=None, messages=None):
+def _make_session(user=None, tasks=None, debt_sum=None, insights=None, messages=None, avg_session_length=None):
     """Return an AsyncMock session whose execute() yields results in call order."""
     session = AsyncMock()
     results = [
@@ -92,6 +92,8 @@ def _make_session(user=None, tasks=None, debt_sum=None, insights=None, messages=
         _scalars_result(insights or []),
         # 5. Messages query → scalars().all()
         _scalars_result(messages or []),
+        # 6. Suggested session length query → scalar_one_or_none
+        _scalar_result(avg_session_length),
     ]
     session.execute = AsyncMock(side_effect=results)
     return session
@@ -304,3 +306,102 @@ def test_time_debt_prompt_format():
     )
     output = to_prompt_string(ctx)
     assert "3.5h of 10.0h limit (35.0%)" in output
+
+
+# ---------------------------------------------------------------------------
+# test_planning_context_section
+# ---------------------------------------------------------------------------
+
+
+def test_planning_context_section_appears_with_deadline():
+    """PLANNING CONTEXT section appears and includes computed weeks when a deadline exists."""
+    from datetime import date, timedelta
+    from app.agent.context_assembler import _parse_deadline_string
+
+    # Pick a deadline 11 weeks from today
+    future_date = date.today() + timedelta(weeks=11)
+    deadline_str = future_date.strftime("%B %d, %Y")
+
+    ctx = AgentContext(
+        north_star=NorthStar(
+            goals=["NeetCode 150"],
+            deadlines={"NeetCode 150": deadline_str},
+        ),
+        time_debt=TimeDebtSummary(total_hours=0.0, max_debt_limit=0.0, percentage=0.0),
+        current_time=datetime.now(timezone.utc),
+        user_timezone="UTC",
+        fixed_commitments_text="Jiu Jitsu Monday, Wednesday, Friday evenings",
+        weeks_until_deadlines={"NeetCode 150": 11.0},
+        suggested_session_length=85,
+    )
+    output = to_prompt_string(ctx)
+
+    assert "=== PLANNING CONTEXT ===" in output
+    assert "NeetCode 150" in output
+    assert "11.0" in output
+    assert "Jiu Jitsu" in output
+    assert "85 min" in output
+
+
+def test_planning_context_section_absent_when_empty():
+    """PLANNING CONTEXT section is omitted when there is no planning data."""
+    ctx = AgentContext(
+        north_star=NorthStar(),
+        time_debt=TimeDebtSummary(total_hours=0.0, max_debt_limit=0.0, percentage=0.0),
+        current_time=datetime.now(timezone.utc),
+        user_timezone="UTC",
+        fixed_commitments_text="",
+        weeks_until_deadlines={},
+        suggested_session_length=None,
+    )
+    output = to_prompt_string(ctx)
+    assert "=== PLANNING CONTEXT ===" not in output
+
+
+def test_parse_deadline_string_iso():
+    """ISO-format strings parse correctly."""
+    from app.agent.context_assembler import _parse_deadline_string
+    from datetime import date
+
+    result = _parse_deadline_string("2026-08-14")
+    assert result == date(2026, 8, 14)
+
+
+def test_parse_deadline_string_natural_language():
+    """Natural-language month-name strings parse correctly."""
+    from app.agent.context_assembler import _parse_deadline_string
+    from datetime import date
+
+    result = _parse_deadline_string("August 14, 2026")
+    assert result == date(2026, 8, 14)
+
+
+def test_parse_deadline_string_invalid():
+    """Unparseable strings return None instead of raising."""
+    from app.agent.context_assembler import _parse_deadline_string
+
+    assert _parse_deadline_string("sometime next year") is None
+    assert _parse_deadline_string("") is None
+    assert _parse_deadline_string(None) is None
+
+
+@pytest.mark.asyncio
+async def test_assemble_context_populates_planning_fields():
+    """assemble_context populates fixed_commitments_text and suggested_session_length."""
+    user = _make_user()
+    user.onboarding_data = {
+        "fixed_commitments": "Jiu Jitsu Mon/Wed/Fri",
+    }
+    user.pending_confirmation = None
+    session = _make_session(user=user, avg_session_length=85.0)
+    north_star = NorthStar(goals=["Goal"], deadlines={"Goal": "2026-12-31"})
+
+    with patch(
+        "app.agent.context_assembler.read_goals",
+        new=AsyncMock(return_value=north_star),
+    ):
+        ctx = await assemble_context(session, uuid.uuid4())
+
+    assert ctx.fixed_commitments_text == "Jiu Jitsu Mon/Wed/Fri"
+    assert ctx.suggested_session_length == 85
+    assert "Goal" in ctx.weeks_until_deadlines

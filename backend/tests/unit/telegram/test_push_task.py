@@ -152,5 +152,6 @@ async def test_push_task_proposal_includes_debt_info(
         await handle(session, user, _make_message("push report"), _make_intent("report"))
 
     reply = mock_send_message.call_args[0][1]
-    assert "time debt" in reply
-    assert "4.0h total" in reply
+    assert "Time debt" in reply
+    # new_total = 3.0 (current) + 1.0 (delta) = 4.0; dot is MarkdownV2-escaped
+    assert r"4\.0" in reply

@@ -43,13 +43,20 @@ class Event(BaseModel):
             is_ballast_event=_BALLAST_TAG in description,
         )
 
-    def to_gcal_body(self) -> dict:
-        """Serialize to a Google Calendar API event resource dict."""
+    def to_gcal_body(self, *, tz_name: str | None = None) -> dict:
+        """Serialize to a Google Calendar API event resource dict.
+
+        When the datetime carries a ``ZoneInfo`` tzinfo (which exposes ``.key``),
+        the IANA timezone name is included in the ``start`` and ``end`` dicts so
+        GCal stores the event in the correct local timezone rather than treating
+        the offset as a fixed UTC offset.
+        """
+        from app.calendar.gcal_client import _dt_to_gcal_entry
         return {
             "summary": self.title,
             "description": self.description,
-            "start": {"dateTime": self.start.isoformat()},
-            "end": {"dateTime": self.end.isoformat()},
+            "start": _dt_to_gcal_entry(self.start, tz_name=tz_name),
+            "end": _dt_to_gcal_entry(self.end, tz_name=tz_name),
         }
 
 

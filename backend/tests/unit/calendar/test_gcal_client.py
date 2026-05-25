@@ -192,3 +192,130 @@ async def test_delete_event_http_error_raises_calendar_error(mock_gcal_client):
 
     with pytest.raises(CalendarError):
         await client.delete_event("evt-3")
+
+
+# ---------------------------------------------------------------------------
+# Timezone serialization correctness
+# ---------------------------------------------------------------------------
+
+
+def test_2pm_pdt_serializes_with_correct_offset():
+    """A 2 PM PDT datetime must serialize to an ISO string with -07:00, not +00:00.
+
+    Bug regression test: events were being created at 7 AM on GCal because the
+    local time was serialized as if it were UTC (2 PM UTC = 7 AM PDT).
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from app.calendar.gcal_client import _dt_to_gcal_entry
+
+    pdt = ZoneInfo("America/Los_Angeles")
+    # 14 May 2026 is during Pacific Daylight Time (UTC-7)
+    start = datetime(2026, 5, 25, 14, 0, 0, tzinfo=pdt)
+
+    entry = _dt_to_gcal_entry(start)
+
+    assert entry["dateTime"] == "2026-05-25T14:00:00", (
+        f"Expected local wall-clock 14:00:00, got: {entry['dateTime']}"
+    )
+    assert entry.get("timeZone") == "America/Los_Angeles", (
+        f"Expected IANA timeZone key, got: {entry.get('timeZone')}"
+    )
+
+
+def test_to_gcal_body_includes_timezone_for_zoneinfo():
+    """Event.to_gcal_body() includes timeZone when datetimes carry a ZoneInfo tzinfo."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from app.api.v1.schemas.calendar import Event
+
+    pdt = ZoneInfo("America/Los_Angeles")
+    start = datetime(2026, 5, 25, 14, 0, 0, tzinfo=pdt)
+    end = datetime(2026, 5, 25, 15, 30, 0, tzinfo=pdt)
+    event = Event(id="", title="Deep work", start=start, end=end)
+
+    body = event.to_gcal_body()
+
+    assert body["start"]["dateTime"] == "2026-05-25T14:00:00"
+    assert body["start"]["timeZone"] == "America/Los_Angeles"
+    assert body["end"]["dateTime"] == "2026-05-25T15:30:00"
+    assert body["end"]["timeZone"] == "America/Los_Angeles"
+
+
+def test_to_gcal_body_fixed_offset_uses_passed_tz_name():
+    """Reloaded JSON datetimes (fixed offset) still get IANA timeZone when tz_name passed."""
+    from datetime import datetime, timezone, timedelta
+    from app.api.v1.schemas.calendar import Event
+
+    pdt_fixed = timezone(timedelta(hours=-7))
+    start = datetime(2026, 5, 25, 14, 0, 0, tzinfo=pdt_fixed)
+    end = datetime(2026, 5, 25, 15, 30, 0, tzinfo=pdt_fixed)
+    event = Event(id="", title="Deep work", start=start, end=end)
+
+    body = event.to_gcal_body(tz_name="America/Los_Angeles")
+
+    assert body["start"]["dateTime"] == "2026-05-25T14:00:00"
+    assert body["start"]["timeZone"] == "America/Los_Angeles"
+
+
+def test_slots_with_utc_events_still_use_user_tz():
+    """When GCal returns UTC events, generated slots must still be in user local TZ."""
+    from datetime import date, datetime, timezone
+    from zoneinfo import ZoneInfo
+    from app.api.v1.schemas.calendar import Event
+    from app.calendar.slot_finder import find_slots_on_day
+
+    pdt = ZoneInfo("America/Los_Angeles")
+    # Busy block at 10:00–11:00 UTC (3–4 AM PDT) — should not force slots into UTC wall clock
+    utc_events = [
+        Event(
+            id="e1",
+            title="Busy",
+            start=datetime(2026, 5, 25, 10, 0, tzinfo=timezone.utc),
+            end=datetime(2026, 5, 25, 11, 0, tzinfo=timezone.utc),
+        )
+    ]
+    slots = find_slots_on_day(
+        target_date=date(2026, 5, 25),
+        duration_mins=60,
+        existing_events=utc_events,
+        user_tz=pdt,
+    )
+    assert slots, "Expected free slots on the day"
+    for slot in slots:
+        assert slot.start.tzinfo == pdt
+        assert "-07:00" in slot.start.isoformat()
+    # 2 PM PDT must appear as hour 14 local, not hour 14 UTC (which would be 7 AM PDT)
+    two_pm = [s for s in slots if s.start.astimezone(pdt).hour == 14]
+    assert two_pm, "Expected a 2 PM PDT slot when calendar uses user_tz"
+
+
+def test_slots_on_empty_day_use_user_tz_not_utc():
+    """find_slots_on_day with no existing events must use user_tz, not UTC.
+
+    Regression test: when a day had no GCal events, slots were generated in UTC.
+    For a PDT user, a '14:00 slot' would be 14:00 UTC = 7:00 AM PDT on GCal.
+    """
+    from datetime import date
+    from zoneinfo import ZoneInfo
+    from app.calendar.slot_finder import find_slots_on_day
+
+    pdt = ZoneInfo("America/Los_Angeles")
+    slots = find_slots_on_day(
+        target_date=date(2026, 5, 25),
+        duration_mins=60,
+        existing_events=[],
+        user_tz=pdt,
+    )
+
+    assert slots, "Should return slots for a free day"
+    for slot in slots:
+        # All slot datetimes must carry the PDT timezone, not UTC
+        assert slot.start.tzinfo is pdt, (
+            f"Expected ZoneInfo('America/Los_Angeles') tzinfo, got {slot.start.tzinfo!r}"
+        )
+        # When serialized, must include PDT offset (-07:00), not UTC (+00:00)
+        iso = slot.start.isoformat()
+        assert "-07:00" in iso, (
+            f"Slot datetime {iso!r} does not contain PDT offset; would appear as UTC on GCal"
+        )

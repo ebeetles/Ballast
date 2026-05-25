@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from uuid import UUID
 
 from zoneinfo import ZoneInfoNotFoundError, ZoneInfo
@@ -16,6 +17,74 @@ from app.db.models.task import Task, TaskStatus
 from app.db.models.time_debt import TimeDebtLedger
 from app.db.models.user import User
 from app.memory.north_star import NorthStar, read_goals
+from app.services.scheduling_prefs import effective_timezone_name, user_timezone
+
+# Month abbreviations used in natural-language deadline strings like "August 14, 2026"
+_MONTH_NAMES = {
+    "january": 1, "jan": 1,
+    "february": 2, "feb": 2,
+    "march": 3, "mar": 3,
+    "april": 4, "apr": 4,
+    "may": 5,
+    "june": 6, "jun": 6,
+    "july": 7, "jul": 7,
+    "august": 8, "aug": 8,
+    "september": 9, "sep": 9, "sept": 9,
+    "october": 10, "oct": 10,
+    "november": 11, "nov": 11,
+    "december": 12, "dec": 12,
+}
+
+
+def _parse_deadline_string(raw: str | None) -> date | None:
+    """Best-effort parse of a deadline string into a date.
+
+    Tries, in order:
+    1. ISO format (YYYY-MM-DD)
+    2. Natural-language "Month Day, Year" or "Month Day Year"
+    3. Returns None if unparseable.
+    """
+    if not raw or not raw.strip():
+        return None
+    text = raw.strip()
+    # ISO
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        pass
+    # Natural language: "August 14, 2026" or "August 14 2026"
+    m = re.search(
+        r"\b([a-zA-Z]+)\s+(\d{1,2})[,\s]+(\d{4})\b",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        month_name = m.group(1).lower()
+        day = int(m.group(2))
+        year = int(m.group(3))
+        month = _MONTH_NAMES.get(month_name)
+        if month:
+            try:
+                return date(year, month, day)
+            except ValueError:
+                pass
+    # "Month Day" with no year — assume current or next year
+    m2 = re.search(r"\b([a-zA-Z]+)\s+(\d{1,2})\b", text, re.IGNORECASE)
+    if m2:
+        month_name = m2.group(1).lower()
+        day = int(m2.group(2))
+        month = _MONTH_NAMES.get(month_name)
+        if month:
+            today = date.today()
+            year = today.year
+            try:
+                candidate = date(year, month, day)
+                if candidate < today:
+                    candidate = date(year + 1, month, day)
+                return candidate
+            except ValueError:
+                pass
+    return None
 
 
 @dataclass
@@ -27,6 +96,7 @@ class TaskSummary:
     status: str
     is_fixed: bool
     requires_proof: bool
+    scheduled_at: datetime | None = None
 
 
 @dataclass
@@ -63,6 +133,11 @@ class AgentContext:
     recent_messages: list[MessageSummary] = field(default_factory=list)
     current_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     user_timezone: str = "UTC"
+    pending_confirmation: dict | None = None
+    # --- planning context ---
+    fixed_commitments_text: str = ""
+    weeks_until_deadlines: dict[str, float | None] = field(default_factory=dict)
+    suggested_session_length: int | None = None
 
 
 async def assemble_context(session: AsyncSession, user_id: UUID) -> AgentContext:
@@ -74,7 +149,7 @@ async def assemble_context(session: AsyncSession, user_id: UUID) -> AgentContext
     # 1. User row (timezone + debt limit)
     user_result = await session.execute(select(User).where(User.id == user_id))
     user = user_result.scalar_one_or_none()
-    user_timezone = user.timezone if user else "UTC"
+    user_tz_name = effective_timezone_name(user.timezone if user else None)
     max_debt_limit = user.max_debt_limit if user else 0.0
 
     # 2. North Star (goals from onboarding data)
@@ -100,6 +175,7 @@ async def assemble_context(session: AsyncSession, user_id: UUID) -> AgentContext
             status=t.status,
             is_fixed=t.is_fixed,
             requires_proof=t.requires_proof,
+            scheduled_at=t.scheduled_at,
         )
         for t in tasks_result.scalars().all()
     ]
@@ -138,7 +214,7 @@ async def assemble_context(session: AsyncSession, user_id: UUID) -> AgentContext
     messages_result = await session.execute(
         select(Message)
         .where(Message.user_id == user_id)
-        .order_by(Message.created_at.desc())
+        .order_by(Message.created_at.desc(), Message.id.desc())
         .limit(10)
     )
     recent_messages = [
@@ -146,14 +222,45 @@ async def assemble_context(session: AsyncSession, user_id: UUID) -> AgentContext
         for m in reversed(messages_result.scalars().all())
     ]
 
+    # 7. Planning context — no extra DB queries except session length avg
+    onboarding_data: dict = (user.onboarding_data or {}) if user else {}
+    fixed_commitments_text: str = onboarding_data.get("fixed_commitments", "") or ""
+
+    today = datetime.now(timezone.utc).date()
+    weeks_until_deadlines: dict[str, float | None] = {}
+    for goal, deadline_str in north_star.deadlines.items():
+        deadline_date = _parse_deadline_string(deadline_str)
+        if deadline_date is not None:
+            weeks_until_deadlines[goal] = round((deadline_date - today).days / 7, 1)
+        else:
+            weeks_until_deadlines[goal] = None
+
+    session_length_result = await session.execute(
+        select(func.avg(Task.duration_mins)).where(
+            Task.user_id == user_id,
+            Task.status == TaskStatus.COMPLETED.value,
+        )
+    )
+    avg_duration = session_length_result.scalar_one_or_none()
+    suggested_session_length: int | None = int(round(avg_duration)) if avg_duration else None
+
+    # Build current_time in the user's local timezone so the agent reasons about
+    # "now" in the user's frame of reference rather than UTC.
+    local_tz = user_timezone(user_tz_name)
+    local_now = datetime.now(local_tz)
+
     return AgentContext(
         north_star=north_star,
         active_tasks=active_tasks,
         time_debt=time_debt,
         insights=insights,
         recent_messages=recent_messages,
-        current_time=datetime.now(timezone.utc),
-        user_timezone=user_timezone,
+        current_time=local_now,
+        user_timezone=user_tz_name,
+        pending_confirmation=user.pending_confirmation if user else None,
+        fixed_commitments_text=fixed_commitments_text,
+        weeks_until_deadlines=weeks_until_deadlines,
+        suggested_session_length=suggested_session_length,
     )
 
 
@@ -176,6 +283,33 @@ def to_prompt_string(context: AgentContext) -> str:
             ns_lines.append(f"  {key}: {value}")
     sections.append("=== NORTH STAR ===\n" + "\n".join(ns_lines))
 
+    # --- PLANNING CONTEXT ---
+    planning_lines: list[str] = []
+    if context.weeks_until_deadlines:
+        for goal, weeks in context.weeks_until_deadlines.items():
+            if weeks is not None:
+                planning_lines.append(f"Weeks until deadline ({goal[:60]}): {weeks}")
+            else:
+                planning_lines.append(f"Weeks until deadline ({goal[:60]}): (unparseable)")
+    if context.fixed_commitments_text:
+        planning_lines.append(
+            f'Fixed commitments (from onboarding): "{context.fixed_commitments_text}"'
+        )
+    fixed_tasks = [t for t in context.active_tasks if t.is_fixed]
+    if fixed_tasks:
+        fixed_lines = []
+        for t in fixed_tasks:
+            sched = t.scheduled_at or t.deadline_at
+            scheduled_str = sched.strftime("%a %H:%M") if sched else "unscheduled"
+            fixed_lines.append(f"  - {t.title} ({t.duration_mins}min, {scheduled_str}) [fixed]")
+        planning_lines.append("Fixed tasks in schedule:\n" + "\n".join(fixed_lines))
+    if context.suggested_session_length is not None:
+        planning_lines.append(
+            f"Avg completed session length: {context.suggested_session_length} min"
+        )
+    if planning_lines:
+        sections.append("=== PLANNING CONTEXT ===\n" + "\n".join(planning_lines))
+
     # --- ACTIVE TASKS ---
     if context.active_tasks:
         task_lines = []
@@ -197,6 +331,26 @@ def to_prompt_string(context: AgentContext) -> str:
         sections.append("=== ACTIVE TASKS ===\n" + "\n".join(task_lines))
     else:
         sections.append("=== ACTIVE TASKS ===\n(none)")
+
+    # --- PENDING CONFIRMATION ---
+    if context.pending_confirmation:
+        action = context.pending_confirmation.get("action", "unknown")
+        title = context.pending_confirmation.get("title", "a task")
+        proposed_start = context.pending_confirmation.get("proposed_start", "")
+        if action == "reschedule":
+            summary = f"Reschedule '{title}' to {proposed_start}"
+        elif action == "add_task":
+            summary = f"Add '{title}' at {proposed_start}"
+        elif action == "delete_task":
+            summary = f"Delete '{title}'"
+        else:
+            summary = f"Pending action on '{title}'"
+        sections.append(
+            "=== PENDING CONFIRMATION ===\n"
+            f"There is a proposal waiting for the user's yes/no: {summary}.\n"
+            "Do not re-propose this. If the user seems to be responding to it, "
+            "remind them to reply yes or no."
+        )
 
     # --- TIME DEBT ---
     td = context.time_debt

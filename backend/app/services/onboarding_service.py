@@ -9,8 +9,10 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.db.crud import task_crud, user_crud
 from app.db.models.user import User
+from app.services.scheduling_prefs import effective_timezone_name
 
 
 _DEBT_LIMIT_BY_STYLE: dict[str, float] = {
@@ -59,11 +61,16 @@ async def complete_onboarding(session: AsyncSession, user: User) -> None:
         except ValueError:
             deadline_at = None
 
+    tz = settings.default_user_timezone
+    if user.timezone and user.timezone not in ("", "UTC"):
+        tz = user.timezone
+
     await user_crud.update(
         session,
         user,
         onboarding_status="complete",
         max_debt_limit=max_debt,
+        timezone=tz,
     )
 
     refined_goal: str = data.get("goal_refined") or data.get("goal_raw", "Primary goal")

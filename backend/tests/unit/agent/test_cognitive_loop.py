@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
-from app.agent.cognitive_loop import run
-from app.agent.context_assembler import AgentContext, MessageSummary
+from app.agent.cognitive_loop import MAX_TOOL_ITERATIONS, run
+from app.agent.context_assembler import AgentContext, MessageSummary, TimeDebtSummary
+from app.agent.response_formatter import _ERROR_FALLBACK, format_for_telegram, format_proposal
 from app.memory.north_star import NorthStar
-from app.agent.context_assembler import TimeDebtSummary
+from app.services.schedule_service import ScheduleProposal
 
 
 # ---------------------------------------------------------------------------
@@ -115,14 +116,14 @@ async def test_run_returns_string(
     patch_save,
     patch_anthropic,
 ) -> None:
-    """Happy path: run() returns a non-empty string from the LLM."""
+    """Happy path: run() returns a non-empty MarkdownV2-formatted string from the LLM."""
     llm_reply = "You pushed this task three days in a row. What's actually going on?"
     patch_anthropic.return_value = _make_anthropic_client(_make_anthropic_response(llm_reply))
 
     result = await run(user_id, "I don't feel like doing it today.")
 
     assert isinstance(result, str)
-    assert result == llm_reply
+    assert result == format_for_telegram(llm_reply)
 
 
 async def test_conversation_history_included_in_llm_call(
@@ -193,4 +194,203 @@ async def test_llm_failure_returns_fallback(
 
     result = await run(user_id, "Hey, what should I work on?")
 
-    assert result == "I'm having trouble thinking right now. Try again in a moment."
+    assert result == _ERROR_FALLBACK
+
+
+# ---------------------------------------------------------------------------
+# Tool-use tests
+# ---------------------------------------------------------------------------
+
+
+def _make_tool_use_response(tool_name: str = "get_tasks", tool_id: str = "tu_abc") -> MagicMock:
+    """Build a fake Anthropic response whose stop_reason is tool_use."""
+    tool_block = MagicMock()
+    tool_block.type = "tool_use"
+    tool_block.id = tool_id
+    tool_block.name = tool_name
+    tool_block.input = {}
+
+    response = MagicMock()
+    response.stop_reason = "tool_use"
+    response.content = [tool_block]
+    return response
+
+
+def _make_text_response(text: str) -> MagicMock:
+    """Build a fake Anthropic response with a single text block."""
+    return _make_anthropic_response(text)
+
+
+@pytest.fixture
+def patch_execute_tool():
+    """Patch execute_tool in cognitive_loop so we can inspect calls."""
+    with patch(
+        "app.agent.cognitive_loop.execute_tool",
+        new_callable=AsyncMock,
+        return_value={"tasks": []},
+    ) as mock:
+        yield mock
+
+
+@pytest.fixture
+def patch_user_crud():
+    """Patch user_crud.get so the loop can fetch a user object without a real DB."""
+    mock_user = MagicMock()
+    mock_user.id = uuid.uuid4()
+    mock_user.max_debt_limit = 8.0
+    with patch(
+        "app.agent.cognitive_loop.user_crud.get",
+        new_callable=AsyncMock,
+        return_value=mock_user,
+    ) as mock:
+        yield mock, mock_user
+
+
+async def test_tool_use_response_triggers_execution(
+    user_id: uuid.UUID,
+    patch_session,
+    patch_assemble,
+    patch_save,
+    patch_anthropic,
+    patch_execute_tool,
+    patch_user_crud,
+) -> None:
+    """When the first response has stop_reason=tool_use, the tool is executed and a
+    follow-up call is made to get the final text response."""
+    tool_response = _make_tool_use_response("get_tasks", "tu_001")
+    final_text = "You have two active tasks."
+    text_response = _make_text_response(final_text)
+
+    client_mock = _make_anthropic_client(tool_response)
+    client_mock.messages.create = AsyncMock(side_effect=[tool_response, text_response])
+    patch_anthropic.return_value = client_mock
+
+    result = await run(user_id, "What tasks do I have?")
+
+    assert result == format_for_telegram(final_text)
+    patch_execute_tool.assert_awaited_once()
+    call_args = patch_execute_tool.await_args
+    assert call_args.args[0] == "get_tasks"
+    assert client_mock.messages.create.await_count == 2
+
+
+async def test_max_iterations_prevents_infinite_loop(
+    user_id: uuid.UUID,
+    patch_session,
+    patch_assemble,
+    patch_save,
+    patch_anthropic,
+    patch_execute_tool,
+    patch_user_crud,
+) -> None:
+    """The loop terminates after MAX_TOOL_ITERATIONS even if every response is tool_use."""
+    always_tool = _make_tool_use_response("get_tasks")
+    client_mock = _make_anthropic_client(always_tool)
+    client_mock.messages.create = AsyncMock(return_value=always_tool)
+    patch_anthropic.return_value = client_mock
+
+    result = await run(user_id, "What are my tasks?")
+
+    assert isinstance(result, str)
+    assert client_mock.messages.create.await_count == MAX_TOOL_ITERATIONS
+
+
+async def test_create_task_tool_sets_pending_confirmation(
+    user_id: uuid.UUID,
+    patch_session,
+    patch_assemble,
+    patch_save,
+    patch_anthropic,
+    patch_user_crud,
+    mock_context: AgentContext,
+) -> None:
+    """When create_task fires and returns a proposal, run() short-circuits and returns
+    the formatted proposal via format_proposal() — no second LLM call is made."""
+    tool_response = _make_tool_use_response("create_task", "tu_002")
+    proposal_result = {
+        "action": "add_task",
+        "title": "Finish slides",
+        "duration_mins": 45,
+        "proposed_start": "2026-05-24T14:00:00+00:00",
+        "proposed_end": "2026-05-24T14:45:00+00:00",
+        "debt_delta": 0.0,
+        "status": "proposal_pending_confirmation",
+    }
+
+    with patch(
+        "app.agent.cognitive_loop.execute_tool",
+        new_callable=AsyncMock,
+        return_value=proposal_result,
+    ) as mock_execute:
+        client_mock = _make_anthropic_client(tool_response)
+        # Only one LLM call — the proposal short-circuits the loop
+        client_mock.messages.create = AsyncMock(return_value=tool_response)
+        patch_anthropic.return_value = client_mock
+
+        result = await run(user_id, "Add a task to finish my slides")
+
+    expected = format_proposal(
+        ScheduleProposal(
+            action="add_task",
+            title="Finish slides",
+            duration_mins=45,
+            proposed_start=datetime(2026, 5, 24, 14, 0, tzinfo=timezone.utc),
+            proposed_end=datetime(2026, 5, 24, 14, 45, tzinfo=timezone.utc),
+            debt_delta=0.0,
+        ),
+        current_debt=mock_context.time_debt.total_hours,
+        max_debt=mock_context.time_debt.max_debt_limit,
+        user_timezone=mock_context.user_timezone,
+    )
+
+    assert result == expected
+    mock_execute.assert_awaited_once()
+    assert mock_execute.await_args.args[0] == "create_task"
+    assert client_mock.messages.create.await_count == 1
+
+
+async def test_debug_logging_dumps_messages_array(
+    user_id: uuid.UUID,
+    patch_session,
+    patch_assemble,
+    patch_save,
+    patch_anthropic,
+    caplog,
+) -> None:
+    """At DEBUG level, run() logs the messages array sent to Anthropic per API call."""
+    import logging
+
+    patch_anthropic.return_value = _make_anthropic_client(_make_anthropic_response("ok"))
+
+    caplog.set_level(logging.DEBUG, logger="app.agent.cognitive_loop")
+    await run(user_id, "what's going on?")
+
+    api_call_logs = [
+        record for record in caplog.records
+        if record.message.startswith("cognitive_loop_api_call")
+    ]
+    assert api_call_logs, "expected at least one cognitive_loop_api_call log entry"
+    assert any("iteration=0" in r.message for r in api_call_logs)
+    assert any("messages=" in r.message for r in api_call_logs)
+
+
+async def test_text_only_response_unchanged(
+    user_id: uuid.UUID,
+    patch_session,
+    patch_assemble,
+    patch_save,
+    patch_anthropic,
+    patch_user_crud,
+) -> None:
+    """When the LLM returns a plain text response (no tools), behaviour is identical
+    to the pre-tool-use path — one API call, correct text returned."""
+    expected = "You pushed this task three days in a row."
+    client_mock = _make_anthropic_client(_make_text_response(expected))
+    patch_anthropic.return_value = client_mock
+
+    with patch("app.agent.cognitive_loop.execute_tool", new_callable=AsyncMock) as mock_execute:
+        result = await run(user_id, "I don't feel like doing it today.")
+
+    assert result == format_for_telegram(expected)
+    client_mock.messages.create.assert_awaited_once()
+    mock_execute.assert_not_awaited()

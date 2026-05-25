@@ -15,6 +15,8 @@ async def handle(session, user: User, message, result: IntentResult) -> None:
     """Route a general_chat message through the cognitive loop and send the response."""
     response = await cognitive_loop.run(user.id, message.text)
     try:
-        await telegram_client.send_message(user.telegram_chat_id, response)
+        await telegram_client.send_message(
+            user.telegram_chat_id, response, parse_mode="MarkdownV2"
+        )
     except Exception:
         logger.exception("failed_to_send_general_chat chat_id=%s", user.telegram_chat_id)

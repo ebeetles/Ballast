@@ -8,12 +8,14 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.response_formatter import format_proposal
 from app.agent.router import IntentResult
 from app.api.v1.schemas.webhook import TelegramMessage
 from app.core.logging import get_logger
 from app.db.crud import user_crud
 from app.db.models.user import User
-from app.services import schedule_service
+from app.services import debt_service, schedule_service
+from app.services.user_service import resolve_timezone
 from app.telegram.client import telegram_client
 
 logger = get_logger(__name__)
@@ -73,12 +75,16 @@ def _awaiting_title_payload(
     duration_mins: int,
     deadline_at: datetime | None,
     requires_proof: bool,
+    day: str | None = None,
+    time_of_day: str | None = None,
 ) -> dict[str, Any]:
     return {
         "action": AWAITING_TITLE_ACTION,
         "duration_mins": duration_mins,
         "deadline_at": deadline_at.isoformat() if deadline_at else None,
         "requires_proof": requires_proof,
+        "day": day,
+        "time_of_day": time_of_day,
     }
 
 
@@ -90,6 +96,9 @@ async def _send_proposal(
     duration_mins: int,
     deadline_at: datetime | None,
     requires_proof: bool,
+    *,
+    day: str | None = None,
+    time_of_day: str | None = None,
 ) -> None:
     """Find a slot, store confirmation state, and send the proposal message."""
     proposal = await schedule_service.propose_slot(
@@ -98,14 +107,16 @@ async def _send_proposal(
         user=user,
         deadline_at=deadline_at,
         requires_proof=requires_proof,
+        day=day,
+        time_of_day=time_of_day,
     )
 
-    date_str = proposal.proposed_start.strftime("%a %b %-d")
-    time_str = proposal.proposed_start.strftime("%-I:%M %p")
-
-    reply = (
-        f"Adding '{title}' ({duration_mins}min) on {date_str} at {time_str}.\n"
-        "Confirm? (yes/no)"
+    current_debt = await debt_service.get_total_debt(session, user.id)
+    reply = format_proposal(
+        proposal,
+        current_debt=current_debt,
+        max_debt=user.max_debt_limit,
+        user_timezone=resolve_timezone(user),
     )
 
     await user_crud.update(
@@ -121,7 +132,7 @@ async def _send_proposal(
         title,
         proposal.proposed_start,
     )
-    await telegram_client.send_message(chat_id, reply)
+    await telegram_client.send_message(chat_id, reply, parse_mode="MarkdownV2")
 
 
 async def handle(
@@ -138,13 +149,19 @@ async def handle(
     duration_mins = _parse_duration_mins(params)
     deadline_at = _parse_deadline(params.get("deadline"))
     requires_proof = bool(params.get("requires_proof", False))
+    day = params.get("day")
+    time_of_day = params.get("time_of_day")
+    if isinstance(day, str):
+        day = day.strip() or None
+    if isinstance(time_of_day, str):
+        time_of_day = time_of_day.strip() or None
 
     if not title:
         await user_crud.update(
             session,
             user,
             pending_confirmation=_awaiting_title_payload(
-                duration_mins, deadline_at, requires_proof
+                duration_mins, deadline_at, requires_proof, day, time_of_day
             ),
         )
         await session.flush()
@@ -154,7 +171,15 @@ async def handle(
         return
 
     await _send_proposal(
-        session, user, chat_id, title, duration_mins, deadline_at, requires_proof
+        session,
+        user,
+        chat_id,
+        title,
+        duration_mins,
+        deadline_at,
+        requires_proof,
+        day=day if isinstance(day, str) else None,
+        time_of_day=time_of_day if isinstance(time_of_day, str) else None,
     )
 
 
@@ -171,6 +196,8 @@ async def handle_awaiting_title(
     duration_mins = int(raw.get("duration_mins", 60))
     deadline_at = _parse_deadline(raw.get("deadline_at"))
     requires_proof = bool(raw.get("requires_proof", False))
+    day = raw.get("day")
+    time_of_day = raw.get("time_of_day")
 
     if not title:
         await telegram_client.send_message(
@@ -179,5 +206,13 @@ async def handle_awaiting_title(
         return
 
     await _send_proposal(
-        session, user, chat_id, title, duration_mins, deadline_at, requires_proof
+        session,
+        user,
+        chat_id,
+        title,
+        duration_mins,
+        deadline_at,
+        requires_proof,
+        day=day if isinstance(day, str) else None,
+        time_of_day=time_of_day if isinstance(time_of_day, str) else None,
     )

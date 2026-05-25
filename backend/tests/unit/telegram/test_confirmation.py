@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.schemas.webhook import TelegramChat, TelegramMessage
-from app.db.crud import task_crud, user_crud
+from app.db.crud import message_crud, task_crud, user_crud
 from app.db.models.task import Task, TaskStatus
 from app.db.models.user import User
 from app.services.schedule_service import ScheduleProposal
@@ -200,3 +200,64 @@ async def test_no_variants_accepted(
 
     await session.refresh(user)
     assert user.pending_confirmation is None
+
+
+# ---------------------------------------------------------------------------
+# Conversation history persistence
+# ---------------------------------------------------------------------------
+
+
+async def _messages_for(session: AsyncSession, user: User) -> list[tuple[str, str]]:
+    rows = await message_crud.list(session, limit=100)
+    return [(m.role, m.content) for m in rows if m.user_id == user.id]
+
+
+@pytest.mark.asyncio
+async def test_yes_persists_messages(
+    session: AsyncSession, user: User, task: Task, mock_send_message: AsyncMock
+) -> None:
+    """Yes branch saves both the user reply and the bot's 'Done' message."""
+    await _set_confirmation(session, user, _reschedule_proposal(task))
+
+    with patch(
+        "app.telegram.handlers.confirmation.schedule_service.commit_reschedule",
+        new=AsyncMock(),
+    ):
+        await handle_confirmation(session, user, _make_message("yes"))
+
+    history = await _messages_for(session, user)
+    roles = [r for r, _ in history]
+    assert "user" in roles
+    assert "assistant" in roles
+    assistant_replies = [c for r, c in history if r == "assistant"]
+    assert any("Done" in c for c in assistant_replies)
+
+
+@pytest.mark.asyncio
+async def test_no_persists_messages(
+    session: AsyncSession, user: User, task: Task, mock_send_message: AsyncMock
+) -> None:
+    """No branch saves both the user 'no' and the cancellation reply."""
+    await _set_confirmation(session, user, _reschedule_proposal(task))
+    await handle_confirmation(session, user, _make_message("no"))
+
+    history = await _messages_for(session, user)
+    assistant_replies = [c for r, c in history if r == "assistant"]
+    user_msgs = [c for r, c in history if r == "user"]
+    assert "no" in user_msgs
+    assert any("keeping it as is" in c for c in assistant_replies)
+
+
+@pytest.mark.asyncio
+async def test_reprompt_persists_messages(
+    session: AsyncSession, user: User, task: Task, mock_send_message: AsyncMock
+) -> None:
+    """Unrecognized input still persists both the user reply and the reprompt."""
+    await _set_confirmation(session, user, _reschedule_proposal(task))
+    await handle_confirmation(session, user, _make_message("maybe later"))
+
+    history = await _messages_for(session, user)
+    assistant_replies = [c for r, c in history if r == "assistant"]
+    user_msgs = [c for r, c in history if r == "user"]
+    assert "maybe later" in user_msgs
+    assert any("yes/no" in c for c in assistant_replies)

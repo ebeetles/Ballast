@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -14,9 +15,49 @@ from app.calendar.slot_finder import UserPreferences, find_slots_on_day
 from app.core.config import settings
 from app.core.exceptions import CalendarError
 from app.core.logging import get_logger
+from app.services.scheduling_prefs import ensure_user_timezone
 
 _SCOPES = ["https://www.googleapis.com/auth/calendar"]
 _logger = get_logger(__name__)
+
+
+def _dt_to_gcal_entry(dt: datetime, tz_name: str | None = None) -> dict:
+    """Serialize a datetime for the Google Calendar API.
+
+    Uses local wall-clock ``dateTime`` plus IANA ``timeZone`` when possible — the
+    format Google recommends.  Naive datetimes are interpreted as wall-clock in
+    ``tz_name``, never as UTC.
+    """
+    iana: str | None = None
+    if hasattr(dt.tzinfo, "key"):
+        iana = dt.tzinfo.key  # type: ignore[union-attr]
+    elif tz_name:
+        iana = tz_name
+
+    if iana:
+        try:
+            zi = ZoneInfo(iana)
+        except Exception:
+            zi = None
+        if zi is not None:
+            local = ensure_user_timezone(dt, zi)
+            return {
+                "dateTime": local.strftime("%Y-%m-%dT%H:%M:%S"),
+                "timeZone": iana,
+            }
+
+    if dt.tzinfo is not None:
+        return {"dateTime": dt.isoformat()}
+
+    if tz_name:
+        zi = ZoneInfo(tz_name)
+        local = dt.replace(tzinfo=zi)
+        return {
+            "dateTime": local.strftime("%Y-%m-%dT%H:%M:%S"),
+            "timeZone": tz_name,
+        }
+
+    return {"dateTime": dt.isoformat()}
 
 
 class GoogleCalendarClient:
@@ -47,16 +88,28 @@ class GoogleCalendarClient:
         items = result.get("items", [])
         return [Event.from_gcal(item) for item in items]
 
-    async def find_free_slots(self, target_date: date, duration_mins: int) -> list[TimeSlot]:
-        """Return free slots on target_date that fit duration_mins, best-first."""
-        day_start = datetime.combine(target_date, datetime.min.time())
-        day_end = datetime.combine(target_date, datetime.max.time().replace(microsecond=0))
+    async def find_free_slots(
+        self,
+        target_date: date,
+        duration_mins: int,
+        tz: ZoneInfo | None = None,
+    ) -> list[TimeSlot]:
+        """Return free slots on target_date that fit duration_mins, best-first.
+
+        ``tz`` must be the user's IANA timezone (e.g. ``ZoneInfo("America/Los_Angeles")``).
+        It is used to generate slots in local time so that the returned datetimes
+        serialize to correct RFC 3339 offsets for the Google Calendar API.
+        """
+        from datetime import timezone as _tz
+        day_start = datetime.combine(target_date, datetime.min.time(), tzinfo=_tz.utc)
+        day_end = datetime.combine(target_date, datetime.max.time().replace(microsecond=0), tzinfo=_tz.utc)
         existing = await self.get_events(day_start, day_end)
         return find_slots_on_day(
             target_date=target_date,
             duration_mins=duration_mins,
             existing_events=existing,
             user_preferences=UserPreferences(),
+            user_tz=tz,
         )
 
     async def create_event(
@@ -65,6 +118,8 @@ class GoogleCalendarClient:
         start: datetime,
         end: datetime,
         description: str = "",
+        *,
+        tz_name: str | None = None,
     ) -> Event:
         """Insert a new event and return it as an Event model."""
         body = Event(
@@ -73,7 +128,7 @@ class GoogleCalendarClient:
             start=start,
             end=end,
             description=description,
-        ).to_gcal_body()
+        ).to_gcal_body(tz_name=tz_name)
         try:
             raw = await asyncio.to_thread(self._insert_event, body)
         except HttpError as exc:
@@ -82,15 +137,16 @@ class GoogleCalendarClient:
 
     async def update_event(self, event_id: str, **kwargs: object) -> Event:
         """Patch an existing event with the supplied keyword arguments and return it."""
+        tz_name = kwargs.pop("tz_name", None)  # type: ignore[misc]
         patch_body: dict = {}
         if "title" in kwargs:
             patch_body["summary"] = kwargs["title"]
         if "description" in kwargs:
             patch_body["description"] = kwargs["description"]
         if "start" in kwargs:
-            patch_body["start"] = {"dateTime": kwargs["start"].isoformat()}  # type: ignore[union-attr]
+            patch_body["start"] = _dt_to_gcal_entry(kwargs["start"], tz_name=tz_name)  # type: ignore[arg-type]
         if "end" in kwargs:
-            patch_body["end"] = {"dateTime": kwargs["end"].isoformat()}  # type: ignore[union-attr]
+            patch_body["end"] = _dt_to_gcal_entry(kwargs["end"], tz_name=tz_name)  # type: ignore[arg-type]
         try:
             raw = await asyncio.to_thread(self._patch_event, event_id, patch_body)
         except HttpError as exc:

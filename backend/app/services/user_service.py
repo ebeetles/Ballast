@@ -5,7 +5,9 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.db.models.user import User
+from app.services.scheduling_prefs import effective_timezone_name
 
 
 async def get_or_create_user(
@@ -23,8 +25,17 @@ async def get_or_create_user(
     if user is not None:
         return user, False
 
-    user = User(telegram_chat_id=chat_id, onboarding_status="pending")
+    user = User(
+        telegram_chat_id=chat_id,
+        onboarding_status="pending",
+        timezone=settings.default_user_timezone,
+    )
     session.add(user)
     await session.flush()
     await session.refresh(user)
     return user, True
+
+
+def resolve_timezone(user: User) -> str:
+    """IANA timezone for scheduling and display."""
+    return effective_timezone_name(user.timezone)

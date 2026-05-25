@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from app.api.v1.schemas.calendar import Event, TimeSlot
 from app.calendar.overlap_checker import check_overlap
@@ -64,19 +65,27 @@ def find_slots_on_day(
     duration_mins: int,
     existing_events: list[Event],
     user_preferences: UserPreferences | None = None,
+    user_tz: ZoneInfo | None = None,
 ) -> list[TimeSlot]:
     """Return free time slots on target_date sorted best-first by preference score.
 
     Sweeps the full day in duration_mins increments, discarding slots that fall
     in the sleep block or conflict with existing_events, then scores and sorts.
+
+    ``user_tz`` is used as the timezone for the generated slot datetimes when
+    ``existing_events`` is empty.  It must be the user's IANA timezone (e.g.
+    ``ZoneInfo("America/Los_Angeles")``).  If omitted and there are no events, UTC
+    is used — but this will produce incorrect GCal event times for non-UTC users, so
+    callers should always pass ``user_tz``.
     """
     prefs = user_preferences or UserPreferences()
     step = timedelta(minutes=duration_mins)
     duration = timedelta(minutes=duration_mins)
 
-    # Use naive datetimes to match whatever tzinfo the existing events carry.
-    # If events are timezone-aware, combine accordingly.
-    sample_tz = existing_events[0].start.tzinfo if existing_events else None
+    # Always sweep the day in the user's local timezone.  Calendar events may be
+    # returned as UTC (Z suffix); using their tzinfo would place "2 PM" slots at
+    # 14:00 UTC → 7 AM on a Pacific calendar.
+    sample_tz = user_tz or timezone.utc
 
     day_start = datetime.combine(target_date, time(0, 0), tzinfo=sample_tz)
     day_end = datetime.combine(target_date, time(23, 59), tzinfo=sample_tz)

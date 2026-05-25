@@ -24,6 +24,7 @@ class Intent(str, Enum):
     push_task = "push_task"
     complete_task = "complete_task"
     add_task = "add_task"
+    delete_task = "delete_task"
     general_chat = "general_chat"
     unknown = "unknown"
 
@@ -34,7 +35,7 @@ class IntentResult(BaseModel):
     extracted_params: dict[str, Any]
 
 
-_FALLBACK = IntentResult(intent=Intent.unknown, confidence=0.0, extracted_params={})
+_FALLBACK = IntentResult(intent=Intent.general_chat, confidence=0.0, extracted_params={})
 
 
 def _extract_response_text(response: anthropic.types.Message) -> str:
@@ -67,7 +68,7 @@ async def classify_intent(message: str, user_context: dict[str, Any]) -> IntentR
         system_prompt = _PROMPT_PATH.read_text(encoding="utf-8")
         client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
         response = await client.messages.create(
-            model=settings.llm_model,
+            model=settings.router_model,
             max_tokens=256,
             system=system_prompt,
             messages=[{"role": "user", "content": message}],

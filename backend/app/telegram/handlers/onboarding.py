@@ -14,7 +14,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.crud import user_crud
 from app.db.models.user import User
-from app.services import onboarding_service
+from app.services import message_service, onboarding_service
 from app.telegram.client import telegram_client
 
 logger = get_logger(__name__)
@@ -42,7 +42,7 @@ async def _refine_goal(raw_goal: str) -> dict:
     system_prompt = _PROMPT_PATH.read_text(encoding="utf-8")
     client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
     response = await client.messages.create(
-        model=settings.llm_model,
+        model=settings.cognitive_model,
         max_tokens=256,
         system=system_prompt,
         messages=[{"role": "user", "content": raw_goal}],
@@ -71,6 +71,14 @@ def _build_confirmation_summary(data: dict) -> str:
     return "\n".join(lines)
 
 
+async def _send_and_persist(
+    session: AsyncSession, user: User, chat_id: int, reply: str
+) -> None:
+    """Send a Telegram message and persist the assistant reply to conversation history."""
+    await message_service.save_message(session, user.id, "assistant", reply)
+    await telegram_client.send_message(chat_id, reply)
+
+
 async def handle_onboarding(
     session: AsyncSession, user: User, message: TelegramMessage
 ) -> None:
@@ -81,10 +89,15 @@ async def handle_onboarding(
 
     logger.info("onboarding_step chat_id=%s step=%s", chat_id, step)
 
+    if text:
+        await message_service.save_message(session, user.id, "user", text)
+
     match step:
         case "welcome":
             await user_crud.update(session, user, onboarding_step="goal_input")
-            await telegram_client.send_message(
+            await _send_and_persist(
+                session,
+                user,
                 chat_id,
                 "Hey! I'm Ballast — your personal accountability agent.\n\n"
                 "Before we get started, I want to learn about you.\n\n"
@@ -112,7 +125,9 @@ async def handle_onboarding(
             await user_crud.update(session, user, onboarding_step="goal_confirm")
 
             date_note = f" by {target_date}" if target_date else ""
-            await telegram_client.send_message(
+            await _send_and_persist(
+                session,
+                user,
                 chat_id,
                 f"Got it — so: {refined_goal}{date_note}?\n\n"
                 "Does that capture it, or is the target different?",
@@ -128,7 +143,9 @@ async def handle_onboarding(
                     session, user, "goal_target_date", ""
                 )
             await user_crud.update(session, user, onboarding_step="fixed_commitments")
-            await telegram_client.send_message(
+            await _send_and_persist(
+                session,
+                user,
                 chat_id,
                 "What does your weekly schedule look like? Tell me about any fixed "
                 "commitments — classes, training, work hours, anything that can't move.",
@@ -139,7 +156,9 @@ async def handle_onboarding(
                 session, user, "fixed_commitments", text
             )
             await user_crud.update(session, user, onboarding_step="deadline")
-            await telegram_client.send_message(
+            await _send_and_persist(
+                session,
+                user,
                 chat_id,
                 "Is there a hard deadline I should know about? Like an application "
                 "date, exam, or specific target date?",
@@ -148,7 +167,9 @@ async def handle_onboarding(
         case "deadline":
             await onboarding_service.save_onboarding_answer(session, user, "deadline", text)
             await user_crud.update(session, user, onboarding_step="work_preference")
-            await telegram_client.send_message(
+            await _send_and_persist(
+                session,
+                user,
                 chat_id,
                 "When do you do your best focused work? Morning, afternoon, or evening?",
             )
@@ -158,7 +179,9 @@ async def handle_onboarding(
                 session, user, "work_preference", text
             )
             await user_crud.update(session, user, onboarding_step="accountability_style")
-            await telegram_client.send_message(
+            await _send_and_persist(
+                session,
+                user,
                 chat_id,
                 "Last one — how hard should I push you?\n\n"
                 "(A) Gentle — nudges and encouragement\n"
@@ -169,8 +192,8 @@ async def handle_onboarding(
         case "accountability_style":
             style = text.strip().upper()
             if style not in {"A", "B", "C"}:
-                await telegram_client.send_message(
-                    chat_id, "Please reply with A, B, or C."
+                await _send_and_persist(
+                    session, user, chat_id, "Please reply with A, B, or C."
                 )
                 return
             await onboarding_service.save_onboarding_answer(
@@ -178,22 +201,29 @@ async def handle_onboarding(
             )
             await user_crud.update(session, user, onboarding_step="confirm")
             summary = _build_confirmation_summary(user.onboarding_data)
-            await telegram_client.send_message(chat_id, summary)
+            await _send_and_persist(session, user, chat_id, summary)
 
         case "confirm":
             positive = text.lower() in {"yes", "y", "yeah", "yep", "correct", "right", "sure", "ok", "okay"}
             if not positive:
-                await telegram_client.send_message(
+                await _send_and_persist(
+                    session,
+                    user,
                     chat_id,
                     "No problem — what needs to change? (Onboarding restart coming soon; "
                     "for now reply yes when you're ready.)",
                 )
                 return
             await onboarding_service.complete_onboarding(session, user)
-            await telegram_client.send_message(chat_id, "You're all set. Let's get to work.")
+            await _send_and_persist(
+                session, user, chat_id, "You're all set. Let's get to work."
+            )
 
         case _:
             logger.warning("unknown_onboarding_step chat_id=%s step=%s", chat_id, step)
-            await telegram_client.send_message(
-                chat_id, "Something went wrong with onboarding. Please try again later."
+            await _send_and_persist(
+                session,
+                user,
+                chat_id,
+                "Something went wrong with onboarding. Please try again later.",
             )

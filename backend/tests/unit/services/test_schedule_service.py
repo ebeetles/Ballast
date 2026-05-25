@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.crud import task_crud
 from app.db.models.task import Task, TaskStatus
 from app.db.models.user import User
+from app.services.scheduling_prefs import ensure_user_timezone, user_timezone
 from app.services.schedule_service import (
     ScheduleProposal,
     commit_new_task,
@@ -57,8 +58,9 @@ async def test_propose_reschedule_uses_gcal_when_available(user: User, task: Tas
     with patch("app.services.schedule_service._get_gcal_client", return_value=mock_gcal):
         proposal = await propose_reschedule(task, user)
 
-    assert proposal.proposed_start == slot.start
-    assert proposal.proposed_end == slot.end
+    tz = user_timezone(user.timezone)
+    assert proposal.proposed_start == ensure_user_timezone(slot.start, tz)
+    assert proposal.proposed_end == ensure_user_timezone(slot.end, tz)
 
 
 # ---------------------------------------------------------------------------

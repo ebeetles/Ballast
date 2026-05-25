@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.schemas.webhook import TelegramChat, TelegramMessage
+from app.db.models.message import Message
 from app.db.models.task import Task
 from app.db.models.user import User
 from app.telegram.handlers.onboarding import handle_onboarding
@@ -70,6 +71,23 @@ async def test_welcome_step_sends_intro_and_advances_step(
 
     result = await session.execute(select(User).where(User.id == pending_user.id))
     assert result.scalar_one().onboarding_step == "goal_input"
+
+
+@pytest.mark.asyncio
+async def test_welcome_step_persists_user_and_assistant_messages(
+    session: AsyncSession, pending_user: User, mock_send_message: AsyncMock
+) -> None:
+    """Both the user's first message and Ballast's intro are saved to history."""
+    await handle_onboarding(session, pending_user, _make_message(CHAT_ID, "hi"))
+
+    result = await session.execute(select(Message).where(Message.user_id == pending_user.id))
+    rows = list(result.scalars().all())
+    roles = sorted(m.role for m in rows)
+    assert roles == ["assistant", "user"]
+    user_msg = next(m for m in rows if m.role == "user")
+    assistant_msg = next(m for m in rows if m.role == "assistant")
+    assert user_msg.content == "hi"
+    assert "Ballast" in assistant_msg.content
 
 
 # ---------------------------------------------------------------------------

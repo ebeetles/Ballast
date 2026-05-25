@@ -15,8 +15,17 @@ _TELEGRAM_API_BASE = "https://api.telegram.org"
 class TelegramClient:
     """Async wrapper around the Telegram Bot API."""
 
-    async def send_message(self, chat_id: int, text: str) -> None:
-        """Send a text message to the given chat."""
+    async def send_message(
+        self, chat_id: int, text: str, parse_mode: str | None = None
+    ) -> None:
+        """Send a text message to the given chat.
+
+        Args:
+            chat_id: Telegram chat identifier.
+            text: Message text.  When ``parse_mode`` is ``"MarkdownV2"`` the text
+                must already be escaped for Telegram MarkdownV2.
+            parse_mode: Optional Telegram parse mode (e.g. ``"MarkdownV2"``).
+        """
         token = settings.telegram_bot_token.strip()
         if not token:
             raise ValidationError(
@@ -24,8 +33,11 @@ class TelegramClient:
                 "and restart uvicorn."
             )
         url = f"{_TELEGRAM_API_BASE}/bot{token}/sendMessage"
+        payload: dict = {"chat_id": chat_id, "text": text}
+        if parse_mode is not None:
+            payload["parse_mode"] = parse_mode
         async with httpx.AsyncClient() as client:
-            response = await client.post(url, json={"chat_id": chat_id, "text": text})
+            response = await client.post(url, json=payload)
             response.raise_for_status()
 
     def verify_webhook_signature(self, body: bytes, secret_token: str) -> bool:
